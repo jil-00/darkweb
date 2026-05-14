@@ -101,7 +101,7 @@ class CSVExportGenerator:
             "IPinfo City": "",
             "IPinfo Hosting Type": "",
             "IPinfo Privacy Flags": "",
-            "Sources Queried": self._format_list(report.sources_queried),
+            "Sources Queried (count)": len(report.sources_queried),
             "Sources Failed": self._format_list(report.sources_failed),
             "Investigation Timestamp": report.investigation_timestamp.isoformat(),
             "Analyst Notes": report.analyst_notes or "",

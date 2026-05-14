@@ -27,6 +27,8 @@ class ReputationStatus(str, Enum):
     CDN = "CDN Infrastructure"
     NEUTRAL = "Neutral Reputation"
     SUSPICIOUS = "Suspicious Reputation"
+    SUSPICIOUS_TESTING = "Suspicious Testing Infrastructure"
+    POTENTIAL_PHISHING = "Suspicious / Potential Phishing"
     MALICIOUS = "Malicious Reputation"
     UNKNOWN = "Unknown Reputation"
 

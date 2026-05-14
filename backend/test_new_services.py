@@ -19,9 +19,11 @@ print("ExplainableFindingsGenerator instantiated successfully")
 # Create minimal test report
 test_report = UnifiedIntelligenceReport(
     ioc_value="8.8.8.8",
-    ioc_type="ipv4",
+    ioc_type="ip",
+    exposure_score=70.0,
     threat_score=15.0,
     risk_level=RiskLevel.LOW,
+    reputation_status="Trusted ISP Infrastructure",
     confidence_score=0.85,
     findings=[],
     findings_summary="Test findings",

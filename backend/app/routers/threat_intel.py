@@ -37,13 +37,14 @@ async def enrich_ioc(
     try:
         response = await enrichment_engine.enrich_ioc(request)
 
+        # Store minimal source metadata (counts only) to avoid leaking provider identities
         await db.enrichments.insert_one({
             "user_id": str(user["_id"]),
             "ioc_value": request.ioc_value,
             "ioc_type": response.ioc.ioc_type.value if response.ioc else None,
             "threat_level": response.ioc.threat_level.value if response.ioc else None,
             "risk_score": response.ioc.risk_score if response.ioc else None,
-            "sources": [s.value for s in response.sources_queried],
+            "sources_count": len(response.sources_queried),
             "status": response.status,
             "created_at": __import__("datetime").datetime.now(__import__("datetime").timezone.utc),
         })
@@ -87,7 +88,7 @@ async def get_enrichments(
             "threat_level": item.get("threat_level"),
             "risk_score": item.get("risk_score"),
             "status": item["status"],
-            "sources": item.get("sources", []),
+            "sources_count": item.get("sources_count", 0),
             "created_at": item["created_at"],
         })
 
@@ -226,7 +227,7 @@ async def unified_enrich_ioc(
         # Perform unified enrichment
         report = await unified_service.enrich(ioc_value)
 
-        # Store in MongoDB for audit trail
+        # Store minimal audit trail without exposing provider names
         await db.unified_enrichments.insert_one({
             "user_id": str(user["_id"]),
             "ioc_value": report.ioc_value,
@@ -235,8 +236,8 @@ async def unified_enrich_ioc(
             "risk_level": report.risk_level.value,
             "confidence_score": report.confidence_score,
             "findings_count": len(report.findings),
-            "sources_queried": report.sources_queried,
-            "sources_failed": report.sources_failed,
+            "sources_queried_count": len(report.sources_queried),
+            "sources_failed_count": len(report.sources_failed),
             "investigation_timestamp": report.investigation_timestamp,
             "created_at": datetime.now(timezone.utc),
         })
@@ -248,6 +249,10 @@ async def unified_enrich_ioc(
             threat_score=report.threat_score,
             sources_count=len(report.sources_queried)
         )
+
+        # Remove provider names from the returned report to avoid leaking external source identities
+        report.sources_queried = []
+        report.sources_failed = []
 
         return report
 
@@ -277,6 +282,13 @@ async def export_pdf(
         filename = f"report_{safe_ioc}_{timestamp}.pdf"
 
         # Generate PDF
+        # Sanitize report to avoid exposing provider identities in exported documents
+        report.sources_queried = []
+        report.sources_failed = []
+        report.virustotal = None
+        report.shodan = None
+        report.ipinfo = None
+
         pdf_buffer = pdf_generator.generate_report(
             report,
             analyst_notes=analyst_notes,
@@ -332,6 +344,13 @@ async def export_csv(
         filename = f"report_{safe_ioc}_{timestamp}.csv"
 
         # Generate CSV
+        # Sanitize report to avoid exposing provider identities in exported documents
+        report.sources_queried = []
+        report.sources_failed = []
+        report.virustotal = None
+        report.shodan = None
+        report.ipinfo = None
+
         csv_buffer = csv_generator.generate_report(
             report,
             analyst_notes=analyst_notes,

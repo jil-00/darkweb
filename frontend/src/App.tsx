@@ -111,35 +111,36 @@ export default function App() {
   const [exportingCSV, setExportingCSV] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  useEffect(() => {
-    const initializeSessionAndData = async () => {
-      try {
-        setLoading(true);
-        setError(null);
+  const initializeSessionAndData = async () => {
+    try {
+      setLoading(true);
+      setError(null);
+      setSessionReady(false);
 
-        let token = localStorage.getItem("token") || localStorage.getItem("access_token");
-        if (!token) {
-          const response = await api.login("analyst@example.com", "ChangeMe123!");
-          token = response.access_token;
-        }
-        localStorage.setItem("token", token);
-
-        const [dashboardResponse, alertRows] = await Promise.all([
-          api.fetchDashboard(),
-          api.listAlerts(),
-        ]);
-        const typedAlerts = alertRows as Alert[];
-        setAlerts(typedAlerts);
-        setDashboardData(normalizeDashboard(dashboardResponse as RawDashboardResponse, typedAlerts));
-        setSessionReady(true);
-      } catch (err) {
-        setError(err instanceof Error ? err.message : "Failed to initialize session");
-      } finally {
-        setLoading(false);
+      let token = localStorage.getItem("token") || localStorage.getItem("access_token");
+      if (!token) {
+        const response = await api.login("analyst@example.com", "ChangeMe123!");
+        token = response.access_token;
       }
-    };
+      localStorage.setItem("token", token);
 
-    initializeSessionAndData();
+      const [dashboardResponse, alertRows] = await Promise.all([
+        api.fetchDashboard(),
+        api.listAlerts(),
+      ]);
+      const typedAlerts = alertRows as Alert[];
+      setAlerts(typedAlerts);
+      setDashboardData(normalizeDashboard(dashboardResponse as RawDashboardResponse, typedAlerts));
+      setSessionReady(true);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to initialize session");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    void initializeSessionAndData();
   }, []);
 
   const getRiskBand = (score: number) => {
@@ -231,6 +232,21 @@ export default function App() {
     window.location.href = "/";
   };
 
+  const totalExposures = dashboardData?.kpis.total_exposures ?? 0;
+  const averageRiskScore = dashboardData?.kpis.avg_risk_score ?? 0;
+  const criticalAlerts = dashboardData?.kpis.critical_alerts ?? 0;
+  const queryCount = dashboardData?.kpis.query_count ?? 0;
+  const alertPct = clampScore(criticalAlerts * 12.5);
+  const queryPct = clampScore(queryCount * 4);
+  const hasUnifiedData = Boolean(
+    unifiedReport && (
+      unifiedReport.sources_queried.length > 0 ||
+      unifiedReport.findings.length > 0 ||
+      unifiedReport.exposure_score > 0 ||
+      unifiedReport.threat_score > 0
+    )
+  );
+
   return (
     <>
       <Sidebar view={view} onViewChange={setView} onLogout={handleLogout} />
@@ -254,21 +270,78 @@ export default function App() {
         <div className="content-body">
           {!sessionReady && (
             <article className="chart-container">
-              <p className="text-sm text-gray-600">
-                {loading ? "Initializing session and loading data..." : "Session not ready"}
-              </p>
+              <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
+                <div>
+                  <p className="hero-eyebrow">Live intelligence feed</p>
+                  <h3 className="panel-title mb-2">Connecting to analysis services</h3>
+                  <p className="text-sm text-gray-600 max-w-2xl">
+                    {loading
+                      ? "Initializing session and loading data..."
+                      : error
+                        ? "The frontend is up, but the API connection failed. Retry after starting the backend services."
+                        : "Session not ready yet."}
+                  </p>
+                </div>
+                <div className="flex items-center gap-3">
+                  <span className={`status-chip ${error ? "error" : "success"}`}>
+                    {error ? "API unavailable" : "Booting"}
+                  </span>
+                  <button onClick={() => void initializeSessionAndData()} className="btn btn-primary" disabled={loading}>
+                    {loading ? "Retrying..." : "Retry"}
+                  </button>
+                </div>
+              </div>
             </article>
           )}
 
           {sessionReady && view === "dashboard" && (
             <div className="space-y-6">
+              <section className="hero-panel">
+                <div className="hero-copy">
+                  <p className="hero-eyebrow">Threat operations overview</p>
+                  <h2>Enterprise intelligence with faster signal triage</h2>
+                  <p>
+                    Track exposures, validate findings, and move from alerts to action without losing the full investigation context.
+                  </p>
+                </div>
+                <div className="hero-metrics">
+                  <div className="hero-ring-card">
+                    <RadialProgressRing value={averageRiskScore} label="Avg risk" color="#EA580C" size={112} />
+                    <div className="hero-ring-caption">
+                      <span>Risk posture</span>
+                      <strong>{averageRiskScore.toFixed(1)}</strong>
+                    </div>
+                  </div>
+                  <div className="hero-stat-grid">
+                    <div className="hero-stat">
+                      <span className="hero-stat-label">Exposures</span>
+                      <span className="hero-stat-value">{totalExposures}</span>
+                    </div>
+                    <div className="hero-stat">
+                      <span className="hero-stat-label">Critical alerts</span>
+                      <span className="hero-stat-value">{criticalAlerts}</span>
+                    </div>
+                    <div className="hero-stat">
+                      <span className="hero-stat-label">Queries today</span>
+                      <span className="hero-stat-value">{queryCount}</span>
+                    </div>
+                  </div>
+                </div>
+              </section>
+
               <div className="kpi-grid">
                 <div className="kpi-card">
                   <div className="kpi-header">
                     <span className="kpi-label">Total Exposures</span>
                     <span className="kpi-change">+12%</span>
                   </div>
-                  <div className="kpi-value">{dashboardData?.kpis.total_exposures || 0}</div>
+                  <div className="kpi-value">{totalExposures}</div>
+                  <div className="kpi-mini-layout">
+                    <RadialProgressRing value={Math.min(totalExposures, 100)} label="Load" color="#DC2626" size={88} />
+                    <div className="kpi-copy">
+                      <p>Exposure volume is trending upward; keep validating high-signal items first.</p>
+                    </div>
+                  </div>
                   <Sparkline
                     data={[
                       { value: 20 },
@@ -289,7 +362,13 @@ export default function App() {
                     <span className="kpi-label">Avg Risk Score</span>
                     <span className="kpi-change">-5%</span>
                   </div>
-                  <div className="kpi-value">{dashboardData?.kpis.avg_risk_score.toFixed(1) || 0}</div>
+                  <div className="kpi-value">{averageRiskScore.toFixed(1)}</div>
+                  <div className="kpi-mini-layout">
+                    <RadialProgressRing value={averageRiskScore} label="Score" color="#EA580C" size={88} />
+                    <div className="kpi-copy">
+                      <p>Use this as the current threat floor for prioritizing the next investigation step.</p>
+                    </div>
+                  </div>
                   <Sparkline
                     data={[
                       { value: 65 },
@@ -310,7 +389,13 @@ export default function App() {
                     <span className="kpi-label">Critical Alerts</span>
                     <span className="kpi-change">0</span>
                   </div>
-                  <div className="kpi-value">{dashboardData?.kpis.critical_alerts || 0}</div>
+                  <div className="kpi-value">{criticalAlerts}</div>
+                  <div className="kpi-mini-layout">
+                    <RadialProgressRing value={alertPct} label="Pressure" color="#DC2626" size={88} />
+                    <div className="kpi-copy">
+                      <p>Escalation pressure stays low when acknowledgements happen quickly.</p>
+                    </div>
+                  </div>
                   <Sparkline
                     data={[
                       { value: 2 },
@@ -331,7 +416,13 @@ export default function App() {
                     <span className="kpi-label">Queries Today</span>
                     <span className="kpi-change">+32%</span>
                   </div>
-                  <div className="kpi-value">{dashboardData?.kpis.query_count || 0}</div>
+                  <div className="kpi-value">{queryCount}</div>
+                  <div className="kpi-mini-layout">
+                    <RadialProgressRing value={queryPct} label="Velocity" color="#2563EB" size={88} />
+                    <div className="kpi-copy">
+                      <p>Query throughput gives a quick read on active analyst demand.</p>
+                    </div>
+                  </div>
                   <Sparkline
                     data={[
                       { value: 8 },
@@ -451,6 +542,11 @@ export default function App() {
                           <span className="rounded-md bg-slate-100 px-3 py-1 text-xs font-semibold text-slate-700">
                             Reputation: {unifiedReport.reputation_status}
                           </span>
+                          {!hasUnifiedData && (
+                            <span className="rounded-md bg-amber-50 px-3 py-1 text-xs font-semibold text-amber-700 border border-amber-200">
+                              Limited data
+                            </span>
+                          )}
                         </div>
                       </div>
                     </section>
@@ -458,34 +554,55 @@ export default function App() {
                     <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4">
                       <div className="rounded-xl border border-red-200 bg-gradient-to-br from-red-50 to-white p-4">
                         <p className="text-xs font-semibold tracking-wide text-red-800 uppercase">Exposure</p>
-                        <p className="text-4xl font-bold text-red-700 mt-1">{clampScore(unifiedReport.exposure_score).toFixed(1)}</p>
+                        <p className="text-4xl font-bold text-red-700 mt-1">
+                          {hasUnifiedData ? clampScore(unifiedReport.exposure_score).toFixed(1) : "N/A"}
+                        </p>
                         <div className="mt-3 h-2 w-full rounded-full bg-red-100 overflow-hidden">
-                          <div className="h-full bg-red-500" style={{ width: `${clampScore(unifiedReport.exposure_score)}%` }} />
+                          <div
+                            className="h-full bg-red-500 transition-all"
+                            style={{ width: hasUnifiedData ? `${clampScore(unifiedReport.exposure_score)}%` : "0%" }}
+                          />
                         </div>
-                        {unifiedReport.exposure_reasoning && (
+                        {hasUnifiedData && unifiedReport.exposure_reasoning ? (
                           <p className="mt-3 text-xs text-red-800">{unifiedReport.exposure_reasoning.summary}</p>
+                        ) : (
+                          <p className="mt-3 text-xs text-red-800">No exposure data was returned by the connected providers.</p>
                         )}
                       </div>
 
                       <div className="rounded-xl border border-orange-200 bg-gradient-to-br from-orange-50 to-white p-4">
                         <p className="text-xs font-semibold tracking-wide text-orange-800 uppercase">Threat</p>
-                        <p className="text-4xl font-bold text-orange-700 mt-1">{clampScore(unifiedReport.threat_score).toFixed(1)}</p>
+                        <p className="text-4xl font-bold text-orange-700 mt-1">
+                          {hasUnifiedData ? clampScore(unifiedReport.threat_score).toFixed(1) : "N/A"}
+                        </p>
                         <div className="mt-3 h-2 w-full rounded-full bg-orange-100 overflow-hidden">
-                          <div className="h-full bg-orange-500" style={{ width: `${clampScore(unifiedReport.threat_score)}%` }} />
+                          <div
+                            className="h-full bg-orange-500 transition-all"
+                            style={{ width: hasUnifiedData ? `${clampScore(unifiedReport.threat_score)}%` : "0%" }}
+                          />
                         </div>
-                        {unifiedReport.threat_reasoning && (
+                        {hasUnifiedData && unifiedReport.threat_reasoning ? (
                           <p className="mt-3 text-xs text-orange-800">{unifiedReport.threat_reasoning.summary}</p>
+                        ) : (
+                          <p className="mt-3 text-xs text-orange-800">No threat telemetry was returned for this IOC.</p>
                         )}
                       </div>
 
                       <div className="rounded-xl border border-green-200 bg-gradient-to-br from-green-50 to-white p-4">
                         <p className="text-xs font-semibold tracking-wide text-green-800 uppercase">Confidence</p>
-                        <p className="text-4xl font-bold text-green-700 mt-1">{(clampScore(unifiedReport.confidence_score * 100)).toFixed(0)}%</p>
+                        <p className="text-4xl font-bold text-green-700 mt-1">
+                          {hasUnifiedData ? `${clampScore(unifiedReport.confidence_score * 100).toFixed(0)}%` : "N/A"}
+                        </p>
                         <div className="mt-3 h-2 w-full rounded-full bg-green-100 overflow-hidden">
-                          <div className="h-full bg-green-500" style={{ width: `${clampScore(unifiedReport.confidence_score * 100)}%` }} />
+                          <div
+                            className="h-full bg-green-500 transition-all"
+                            style={{ width: hasUnifiedData ? `${clampScore(unifiedReport.confidence_score * 100)}%` : "0%" }}
+                          />
                         </div>
-                        {unifiedReport.confidence_reasoning && (
+                        {hasUnifiedData && unifiedReport.confidence_reasoning ? (
                           <p className="mt-3 text-xs text-green-800">{unifiedReport.confidence_reasoning}</p>
+                        ) : (
+                          <p className="mt-3 text-xs text-green-800">Limited provider coverage. Confidence is unavailable until at least one source responds.</p>
                         )}
                       </div>
 
@@ -493,7 +610,7 @@ export default function App() {
                         <p className="text-xs font-semibold tracking-wide text-blue-800 uppercase">Sources</p>
                         <p className="text-4xl font-bold text-blue-700 mt-1">{unifiedReport.sources_queried.length}</p>
                         <p className="mt-3 text-xs text-blue-800">
-                          {unifiedReport.sources_queried.length > 0 ? unifiedReport.sources_queried.join(", ") : "No successful source responses"}
+                          {unifiedReport.sources_queried.length > 0 ? `${unifiedReport.sources_queried.length} provider(s) responded` : "No successful source responses"}
                         </p>
                       </div>
                     </div>
@@ -509,7 +626,7 @@ export default function App() {
                                   <div className="min-w-0">
                                     <p className="text-sm font-semibold text-slate-900">{finding.title}</p>
                                     <p className="text-xs text-slate-600 mt-1">{finding.description}</p>
-                                    <p className="text-xs text-slate-500 mt-2">Source: {finding.source}</p>
+                                    <p className="text-xs text-slate-500 mt-2">Source: External</p>
                                   </div>
                                   <span className={riskBadgeClass(finding.severity)}>{finding.severity}</span>
                                 </div>
@@ -531,7 +648,7 @@ export default function App() {
                           <p><span className="font-semibold text-slate-900">Updated:</span> {new Date(unifiedReport.last_updated).toLocaleString()}</p>
                           <p><span className="font-semibold text-slate-900">Sources Queried:</span> {unifiedReport.sources_queried.length}</p>
                           {unifiedReport.sources_failed.length > 0 && (
-                            <p><span className="font-semibold text-slate-900">Failed Sources:</span> {unifiedReport.sources_failed.join(", ")}</p>
+                            <p><span className="font-semibold text-slate-900">Failed Sources (count):</span> {unifiedReport.sources_failed.length}</p>
                           )}
                           {unifiedReport.findings_summary && (
                             <p className="rounded-md bg-slate-50 border border-slate-200 p-2 text-xs leading-5 text-slate-600">

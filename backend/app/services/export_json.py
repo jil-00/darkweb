@@ -62,7 +62,7 @@ class JSONExportGenerator:
                         "title": finding.title,
                         "description": finding.description,
                         "severity": finding.severity.value,
-                        "source": finding.source,
+                        "source": "external",
                         "evidence": finding.evidence,
                         "confidence": finding.confidence,
                     }
@@ -70,109 +70,16 @@ class JSONExportGenerator:
                 ],
                 "findings_summary": report.findings_summary,
                 "sources": {
-                    "queried": report.sources_queried,
-                    "failed": report.sources_failed,
+                    "queried_count": len(report.sources_queried),
+                    "failed_count": len(report.sources_failed),
                 },
                 "analyst_notes": analyst_notes or "",
             }
-
-            # Add VirusTotal intelligence
-            if report.virustotal:
-                vt = report.virustotal
-                export_data["intelligence"] = export_data.get("intelligence", {})
-                export_data["intelligence"]["virustotal"] = {
-                    "reputation": vt.reputation,
-                    "detections": {
-                        "malicious": vt.malicious_vendors,
-                        "suspicious": vt.suspicious_vendors,
-                        "undetected": vt.undetected_vendors,
-                        "harmless": vt.harmless_vendors,
-                    },
-                    "community_score": vt.community_score,
-                    "malware_families": vt.malware_families,
-                    "categories": vt.categories,
-                    "tags": vt.tags,
-                    "threat_classifications": vt.threat_classifications,
-                    "mitre_techniques": vt.mitre_techniques,
-                    "related_domains": vt.related_domains[:10] if vt.related_domains else [],
-                    "related_ips": vt.related_ips[:10] if vt.related_ips else [],
-                    "detection_engines": vt.detection_engines,
-                    "last_analysis_date": vt.last_analysis_date.isoformat() if vt.last_analysis_date else None,
-                }
-                if include_raw_responses and vt.raw_response:
-                    export_data["intelligence"]["virustotal"]["raw_response"] = vt.raw_response
-
-            # Add Shodan intelligence
-            if report.shodan:
-                shodan = report.shodan
-                export_data["intelligence"] = export_data.get("intelligence", {})
-                export_data["intelligence"]["shodan"] = {
-                    "network": {
-                        "open_ports": shodan.open_ports,
-                        "asn": shodan.asn,
-                        "isp": shodan.isp,
-                        "organization": shodan.organization,
-                    },
-                    "geolocation": {
-                        "country": shodan.country,
-                        "region": shodan.region,
-                        "city": shodan.city,
-                        "latitude": shodan.latitude,
-                        "longitude": shodan.longitude,
-                    },
-                    "infrastructure": {
-                        "services": shodan.services,
-                        "technologies": shodan.technologies,
-                        "products": shodan.products,
-                        "operating_system": shodan.operating_system,
-                        "hosting_provider": shodan.hosting_provider,
-                    },
-                    "security": {
-                        "cves": shodan.cves,
-                        "cvss_scores": shodan.cvss_scores,
-                        "ssl_valid": shodan.ssl_valid,
-                    },
-                    "domains": shodan.domains[:20] if shodan.domains else [],
-                    "hostnames": shodan.hostnames[:20] if shodan.hostnames else [],
-                    "last_seen": shodan.last_seen.isoformat() if shodan.last_seen else None,
-                }
-                if include_raw_responses and shodan.raw_response:
-                    export_data["intelligence"]["shodan"]["raw_response"] = shodan.raw_response
-
-            # Add IPinfo intelligence
-            if report.ipinfo:
-                ipinfo = report.ipinfo
-                export_data["intelligence"] = export_data.get("intelligence", {})
-                export_data["intelligence"]["ipinfo"] = {
-                    "network": {
-                        "asn": ipinfo.asn,
-                        "organization": ipinfo.organization,
-                        "isp": ipinfo.isp,
-                    },
-                    "geolocation": {
-                        "country": ipinfo.country,
-                        "country_code": ipinfo.country_code,
-                        "region": ipinfo.region,
-                        "city": ipinfo.city,
-                        "postal_code": ipinfo.postal_code,
-                        "timezone": ipinfo.timezone,
-                        "latitude": ipinfo.latitude,
-                        "longitude": ipinfo.longitude,
-                    },
-                    "infrastructure": {
-                        "hosting_type": ipinfo.hosting_type,
-                        "is_anycast": ipinfo.is_anycast,
-                        "network_owner": ipinfo.network_owner,
-                    },
-                    "privacy_flags": {
-                        "is_vpn": ipinfo.is_vpn,
-                        "is_proxy": ipinfo.is_proxy,
-                        "is_tor": ipinfo.is_tor,
-                        "is_datacenter": ipinfo.is_datacenter,
-                    },
-                }
-                if include_raw_responses and ipinfo.raw_response:
-                    export_data["intelligence"]["ipinfo"]["raw_response"] = ipinfo.raw_response
+            # Do not include provider-specific payloads or provider names to avoid exposing external sources.
+            export_data["intelligence"] = {
+                "providers_present_count": len(report.sources_queried),
+                "providers_failed_count": len(report.sources_failed),
+            }
 
             # Convert to JSON
             json_str = json.dumps(export_data, indent=2, default=str)

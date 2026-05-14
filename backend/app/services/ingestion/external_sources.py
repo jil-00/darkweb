@@ -312,9 +312,10 @@ class VirusTotalConnector(BaseExternalCollector):
 
         malicious = int(stats.get("malicious", 0) or 0)
         suspicious = int(stats.get("suspicious", 0) or 0)
+        harmless = int(stats.get("harmless", 0) or 0)
+        undetected = int(stats.get("undetected", 0) or 0)
+        # Preserve benign/clean responses but keep occurrences focused on detections
         occurrences = malicious + suspicious
-        if occurrences <= 0:
-            return []
 
         total_scans = sum(int(value or 0) for value in stats.values()) or 1
         confidence = (malicious + (suspicious * 0.5)) / total_scans
@@ -323,7 +324,12 @@ class VirusTotalConnector(BaseExternalCollector):
         return [
             self._build_finding(
                 query=target,
-                payload={"attributes": attributes, "analysis_stats": stats},
+                payload={
+                    "attributes": attributes,
+                    "analysis_stats": stats,
+                    "harmless": harmless,
+                    "undetected": undetected,
+                },
                 occurrences=occurrences,
                 confidence=confidence,
                 first_seen=datetime.fromtimestamp(first_seen, tz=timezone.utc)
@@ -369,8 +375,6 @@ class ShodanConnector(BaseExternalCollector):
             raise APIResponseFormatError(self.provider_name, "matches field must be a list")
 
         total = int(payload.get("total") or len(matches) or 0)
-        if total <= 0:
-            return []
 
         top_match = matches[0] if matches else {}
         if not isinstance(top_match, dict):
@@ -391,8 +395,9 @@ class ShodanConnector(BaseExternalCollector):
                     "total": total,
                     "open_ports": open_ports[:10],
                     "top_match": top_match,
+                    "matches": matches[:10],
                 },
-                occurrences=max(1, min(total, 10)),
+                occurrences=max(1, min(total, 10)) if total > 0 else 1,
                 confidence=confidence,
             )
         ]
@@ -437,10 +442,8 @@ class IPinfoConnector(BaseExternalCollector):
             bool(abuse.get("is_abuse")),
         ]
         occurrences = sum(1 for flag in risk_flags if flag)
-        if occurrences <= 0:
-            return []
 
-        confidence = min(1.0, occurrences / len(risk_flags))
+        confidence = min(1.0, max(1, occurrences) / len(risk_flags))
         return [
             self._build_finding(
                 query=target,
@@ -448,8 +451,9 @@ class IPinfoConnector(BaseExternalCollector):
                     "ipinfo": payload,
                     "privacy": privacy,
                     "abuse": abuse,
+                    "risk_flags": risk_flags,
                 },
-                occurrences=occurrences,
+                occurrences=max(1, occurrences),
                 confidence=confidence,
                 contains_password=False,
             )

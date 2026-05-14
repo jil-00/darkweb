@@ -228,7 +228,7 @@ class PDFReportGenerator:
             blocks.append(Paragraph(finding.description, self.styles["Body"]))
             blocks.append(
                 Paragraph(
-                    f"Source: {finding.source} | Confidence: {finding.confidence * 100:.0f}%",
+                    f"Source: External | Confidence: {finding.confidence * 100:.0f}%",
                     self.styles["Small"],
                 )
             )
@@ -274,9 +274,10 @@ class PDFReportGenerator:
         return rows
 
     def _build_sources(self, report: UnifiedIntelligenceReport) -> list:
-        queried = ", ".join(report.sources_queried) if report.sources_queried else "None"
-        failed = ", ".join(report.sources_failed) if report.sources_failed else "None"
-        rows = [("Queried Sources", queried), ("Failed Sources", failed), *self._build_source_rows(report)]
+        # Only include provider counts to avoid exposing provider identities in exports
+        queried_count = str(len(report.sources_queried))
+        failed_count = str(len(report.sources_failed))
+        rows = [("Queried Sources (count)", queried_count), ("Failed Sources (count)", failed_count), ("Provider telemetry", "Omitted to preserve privacy")]
         return [Paragraph("Source Telemetry", self.styles["SectionTitle"]), self._kv_table(rows), Spacer(1, 0.16 * inch)]
 
     def _build_footer(self, report: UnifiedIntelligenceReport, analyst_notes: Optional[str]) -> list:
