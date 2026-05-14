@@ -1,0 +1,930 @@
+import { useEffect, useMemo, useState } from "react";
+import { Bell, Radar, Search, ShieldAlert, Users, Activity, Download, FileText } from "lucide-react";
+import {
+  Line,
+  LineChart,
+  ResponsiveContainer,
+  Tooltip,
+  XAxis,
+  YAxis,
+  Bar,
+  BarChart,
+  CartesianGrid,
+  AreaChart,
+  Area
+} from "recharts";
+import {
+  acknowledgeAlert,
+  addWatchTarget,
+  fetchDashboard,
+  getResults,
+  listAlerts,
+  listWatchTargets,
+  login,
+  register,
+  scan,
+  SearchResponse,
+  subscribeAlertStream,
+  triggerBackgroundScan,
+  unifiedEnrich,
+  exportPDF,
+  exportCSV,
+  UnifiedIntelligenceReport
+} from "./api";
+import { Sidebar } from "./Sidebar";
+import { RadialProgressRing } from "./RadialProgressRing";
+import { Sparkline } from "./Sparkline";
+
+type Mode = "login" | "register";
+type View = "dashboard" | "search" | "alerts" | "admin";
+
+type RiskBand = {
+  label: string;
+  tone: string;
+  description: string;
+};
+
+function getRiskBand(score: number): RiskBand {
+  if (score < 20) {
+    return {
+      label: "Low exposure",
+      tone: "low",
+      description: "Routine or public-facing signal with minimal concern."
+    };
+  }
+
+  if (score < 45) {
+    return {
+      label: "Moderate exposure",
+      tone: "moderate",
+      description: "Worth watching, but not yet a high-priority event."
+    };
+  }
+
+  if (score < 70) {
+    return {
+      label: "Elevated exposure",
+      tone: "elevated",
+      description: "Signals are increasing and deserve closer review."
+    };
+  }
+
+  return {
+    label: "High exposure",
+    tone: "high",
+    description: "Actionable risk that needs immediate attention."
+  };
+}
+
+function riskToneClass(tone: RiskBand["tone"]): string {
+  switch (tone) {
+    case "low":
+      return "risk-low";
+    case "moderate":
+      return "risk-moderate";
+    case "elevated":
+      return "risk-elevated";
+    case "high":
+      return "risk-high";
+    default:
+      return "risk-low";
+  }
+}
+
+function detectQueryType(value: string): "email" | "domain" | "username" {
+  const normalized = value.trim().toLowerCase();
+  if (normalized.includes("@")) {
+    return "email";
+  }
+  if (normalized.includes(".")) {
+    return "domain";
+  }
+  return "username";
+}
+
+export default function App() {
+  const [email, setEmail] = useState("analyst@example.com");
+  const [password, setPassword] = useState("ChangeMe123!");
+  const [mode, setMode] = useState<Mode>("login");
+  const [authed, setAuthed] = useState(Boolean(localStorage.getItem("token")));
+  const [view, setView] = useState<View>("dashboard");
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [liveEvent, setLiveEvent] = useState<string>("No live alerts yet");
+
+  const [dashboard, setDashboard] = useState<any>(null);
+  const [alerts, setAlerts] = useState<any[]>([]);
+  const [watches, setWatches] = useState<any[]>([]);
+  const [query, setQuery] = useState("");
+  const [queryType, setQueryType] = useState<"email" | "domain" | "username">("email");
+  const [result, setResult] = useState<SearchResponse | null>(null);
+  const [unifiedReport, setUnifiedReport] = useState<UnifiedIntelligenceReport | null>(null);
+  const [exportingPDF, setExportingPDF] = useState(false);
+  const [exportingCSV, setExportingCSV] = useState(false);
+  const [successMessage, setSuccessMessage] = useState<string | null>(null);
+
+  const stats = useMemo(() => dashboard?.stats ?? null, [dashboard]);
+  const averageRisk = stats?.average_risk_score ?? 0;
+  const averageRiskBand = useMemo(() => getRiskBand(averageRisk), [averageRisk]);
+
+  useEffect(() => {
+    setQueryType(detectQueryType(query));
+  }, [query]);
+
+  async function refreshData() {
+    const [dash, alertList, watchList] = await Promise.all([
+      fetchDashboard(),
+      listAlerts(),
+      listWatchTargets()
+    ]);
+    setDashboard(dash);
+    setAlerts(alertList);
+    setWatches(watchList);
+  }
+
+  useEffect(() => {
+    if (!authed) return;
+    refreshData().catch((err) => {
+      if (err?.response?.status === 401 || err?.response?.status === 403) {
+        localStorage.removeItem("token");
+        setAuthed(false);
+        setError("Session expired. Please sign in again.");
+        return;
+      }
+      setError(err?.response?.data?.detail ?? "Failed to load dashboard");
+    });
+  }, [authed]);
+
+  useEffect(() => {
+    if (!authed) return;
+    const source = subscribeAlertStream((evt) => {
+      if (evt?.event === "heartbeat") return;
+      const summary = evt?.event
+        ? `${evt.event} | ${evt.query ?? ""} | risk ${evt.risk_score ?? "-"}`
+        : "Live alert received";
+      setLiveEvent(summary);
+      refreshData().catch(() => undefined);
+    });
+    if (!source) {
+      setLiveEvent("Live stream unavailable. Core features are still active.");
+      return;
+    }
+    source.onerror = () => {
+      setLiveEvent("Live stream disconnected. Retrying when server is available.");
+    };
+    return () => source.close();
+  }, [authed]);
+
+  async function submitAuth() {
+    setLoading(true);
+    setError(null);
+    try {
+      const response =
+        mode === "login" ? await login(email, password) : await register(email, password);
+      localStorage.setItem("token", response.access_token);
+      setAuthed(true);
+    } catch (err: any) {
+      setError(err?.response?.data?.detail ?? "Authentication failed");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function runScan() {
+    setLoading(true);
+    setError(null);
+    try {
+      // First try unified enrichment
+      const unified = await unifiedEnrich(query);
+      setUnifiedReport(unified);
+      
+      // Also get legacy scan results for backward compatibility
+      const legacyResult = await scan({
+        query,
+        query_type: queryType,
+        use_regex: false,
+        fuzzy: true
+      });
+      setResult(legacyResult);
+      await refreshData();
+    } catch (err: any) {
+      setError(err?.response?.data?.detail ?? "Scan failed");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function loadCachedResult() {
+    if (!query) return;
+    setLoading(true);
+    setError(null);
+    try {
+      const cached = await getResults(query);
+      setResult(cached);
+    } catch (err: any) {
+      setError(err?.response?.data?.detail ?? "No cached results found");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function createWatch() {
+    if (!query) return;
+    setLoading(true);
+    try {
+      await addWatchTarget({
+        target: query,
+        query_type: queryType,
+        interval_minutes: 30
+      });
+      await refreshData();
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function ackAlert(id: string) {
+    await acknowledgeAlert(id);
+    await refreshData();
+  }
+
+  async function triggerScanJob() {
+    setLoading(true);
+    setError(null);
+    try {
+      const response = await triggerBackgroundScan();
+      setLiveEvent(`Background task queued: ${response.task_id}`);
+    } catch (err: any) {
+      setError(err?.response?.data?.detail ?? "Failed to trigger background task");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function handleExportPDF() {
+    if (!unifiedReport) return;
+    setExportingPDF(true);
+    setError(null);
+    try {
+      const blob = await exportPDF(unifiedReport);
+      const url = window.URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      const timestamp = new Date().toISOString().split("T")[0];
+      link.download = `RJ_Report_${unifiedReport.ioc_value.replace(/[^a-z0-9]/gi, "_")}_${timestamp}.pdf`;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      window.URL.revokeObjectURL(url);
+      setSuccessMessage("PDF report downloaded successfully");
+      setTimeout(() => setSuccessMessage(null), 3000);
+    } catch (err: any) {
+      setError(err?.response?.data?.detail ?? "PDF export failed");
+    } finally {
+      setExportingPDF(false);
+    }
+  }
+
+  async function handleExportCSV() {
+    if (!unifiedReport) return;
+    setExportingCSV(true);
+    setError(null);
+    try {
+      const blob = await exportCSV(unifiedReport);
+      const url = window.URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      const timestamp = new Date().toISOString().split("T")[0];
+      link.download = `RJ_Report_${unifiedReport.ioc_value.replace(/[^a-z0-9]/gi, "_")}_${timestamp}.csv`;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      window.URL.revokeObjectURL(url);
+      setSuccessMessage("CSV report downloaded successfully");
+      setTimeout(() => setSuccessMessage(null), 3000);
+    } catch (err: any) {
+      setError(err?.response?.data?.detail ?? "CSV export failed");
+    } finally {
+      setExportingCSV(false);
+    }
+  }
+
+  if (!authed) {
+    return (
+      <main className="min-h-screen p-6 sm:p-12 flex items-center justify-center">
+        <section className="glass fade-up max-w-xl w-full rounded-xl p-8 shadow-lg">
+          <div className="flex items-center gap-3 mb-6">
+            <Radar className="text-blue-600" size={32} />
+            <h1 className="text-3xl font-bold text-gray-900">RJ Intelligence</h1>
+          </div>
+          <p className="text-gray-600 mb-8 text-base font-medium">
+            Unified Threat Intelligence & Infrastructure Analysis
+          </p>
+
+          <div className="grid gap-4">
+            <input
+              className="rounded-lg border border-gray-300 px-4 py-3 text-gray-900 placeholder-gray-500 focus:outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20 transition"
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+              placeholder="Work email"
+            />
+            <input
+              type="password"
+              className="rounded-lg border border-gray-300 px-4 py-3 text-gray-900 placeholder-gray-500 focus:outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20 transition"
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              placeholder="Password"
+            />
+            <button
+              className="rounded-lg bg-blue-600 text-white py-3 font-semibold hover:bg-blue-700 transition shadow-md hover:shadow-lg"
+              disabled={loading}
+              onClick={submitAuth}
+            >
+              {loading ? "Working..." : mode === "login" ? "Sign in" : "Create account"}
+            </button>
+            <button
+              className="text-sm text-blue-600 font-medium hover:text-blue-700 hover:underline transition"
+              onClick={() => setMode(mode === "login" ? "register" : "login")}
+            >
+              {mode === "login" ? "Need an account? Register" : "Have an account? Login"}
+            </button>
+            {error && <p className="text-red-600 text-sm font-medium bg-red-50 p-3 rounded-lg">{error}</p>}
+          </div>
+        </section>
+      </main>
+    );
+  }
+
+  return (
+    <>
+      <Sidebar
+        view={view}
+        onViewChange={setView}
+        onLogout={() => {
+          localStorage.removeItem("token");
+          setAuthed(false);
+        }}
+      />
+      
+      <div className="main-content">
+        {/* Content Header */}
+        <div className="content-header fade-up">
+          <h1>RJ Intelligence Platform</h1>
+          <p>Advanced Threat Investigation Console</p>
+          <p className="text-xs text-gray-500 mt-1 font-medium">Live stream: {liveEvent}</p>
+        </div>
+
+        {/* Notifications */}
+        {error && (
+          <div className="notification error fade-up">
+            {error}
+          </div>
+        )}
+        {successMessage && (
+          <div className="notification success fade-up">
+            ✓ {successMessage}
+          </div>
+        )}
+
+        {/* Main Content Body */}
+        <div className="content-body">
+          {/* KPI Cards */}
+          <div className="kpi-grid fade-up">
+          {[
+            {
+              label: "Total Queries",
+              value: stats?.total_queries ?? 0,
+              helper: "Searches completed",
+              icon: <Search size={18} />,
+              trend: dashboard?.trends ?? []
+            },
+            {
+              label: "Total Findings",
+              value: stats?.total_findings ?? 0,
+              helper: "Entities matched",
+              icon: <ShieldAlert size={18} />,
+              trend: dashboard?.trends?.map((t: any) => ({ value: t.total_findings ?? 0 })) ?? []
+            },
+            {
+              label: "Open Alerts",
+              value: stats?.active_alerts ?? 0,
+              helper: "Needs review",
+              icon: <Bell size={18} />,
+              trend: dashboard?.trends?.map((t: any) => ({ value: t.open_alerts ?? 0 })) ?? []
+            },
+            {
+              label: "Average Risk",
+              value: averageRisk.toFixed(1),
+              helper: averageRiskBand.label,
+              icon: <Radar size={18} />,
+              band: averageRiskBand,
+              trend: dashboard?.trends?.map((t: any) => ({ value: t.avg_risk ?? 0 })) ?? []
+            }
+          ].map((card) => (
+            <article key={card.label} className="kpi-card fade-up">
+              <div className="kpi-label">
+                <span>{card.label}</span>
+                {card.icon}
+              </div>
+              <h3 className="kpi-value">{String(card.value)}</h3>
+              <p className="kpi-helper">{card.helper}</p>
+              {card.trend && card.trend.length > 0 && (
+                <Sparkline data={card.trend} dataKey="value" color={card.band ? (card.band.tone === "high" ? "#DC2626" : card.band.tone === "elevated" ? "#F97316" : card.band.tone === "moderate" ? "#EAB308" : "#16A34A") : "#3B82F6"} />
+              )}
+              {card.band && (
+                <div className="mt-3">
+                  <div className="risk-progress-bar">
+                    <div className="risk-progress-fill" style={{ width: `${Math.min(100, parseFloat(String(card.value)))}%` }} />
+                  </div>
+                  <p className="mt-2 text-xs text-gray-600">{card.band.description}</p>
+                </div>
+              )}
+            </article>
+          ))}
+          </div>
+
+          {/* Dashboard View */}
+          {view === "dashboard" && (
+            <div className="grid grid-cols-1 xl:grid-cols-3 gap-6 fade-up">
+              {/* Risk Trend Chart */}
+              <article className="xl:col-span-2 chart-container">
+                <div className="chart-header">
+                  <div>
+                    <h2>Risk Trend (7 days)</h2>
+                    <p>Lower scores indicate low exposure, not high severity.</p>
+                  </div>
+                  {averageRiskBand && <span className={`risk-badge ${averageRiskBand.tone}`}>{averageRiskBand.label}</span>}
+                </div>
+                <div className="chart-body">
+                  <ResponsiveContainer width="100%" height="100%">
+                    <AreaChart data={dashboard?.trends ?? []}>
+                      <defs>
+                        <linearGradient id="colorRisk" x1="0" y1="0" x2="0" y2="1">
+                          <stop offset="5%" stopColor="#3B82F6" stopOpacity={0.3}/>
+                          <stop offset="95%" stopColor="#3B82F6" stopOpacity={0}/>
+                        </linearGradient>
+                      </defs>
+                      <XAxis dataKey="date" stroke="#94A3B8" style={{ fontSize: "0.85rem" }} />
+                      <YAxis stroke="#94A3B8" style={{ fontSize: "0.85rem" }} />
+                      <Tooltip 
+                        contentStyle={{
+                          backgroundColor: "#FFF",
+                          border: "1px solid #E2E8F0",
+                          borderRadius: "0.5rem",
+                          boxShadow: "0 4px 12px rgba(0,0,0,0.08)"
+                        }}
+                      />
+                      <Area type="monotone" dataKey="avg_risk" stroke="#3B82F6" strokeWidth={2} fillOpacity={1} fill="url(#colorRisk)" />
+                    </AreaChart>
+                  </ResponsiveContainer>
+                </div>
+              </article>
+
+              {/* Top Sources Chart */}
+              <article className="chart-container">
+                <div className="chart-header">
+                  <h2>Top Sources</h2>
+                  <p>Common intelligence sources</p>
+                </div>
+                <div className="chart-body">
+                  <ResponsiveContainer width="100%" height="100%">
+                    <BarChart data={dashboard?.top_sources ?? []} layout="vertical">
+                      <XAxis type="number" stroke="#94A3B8" style={{ fontSize: "0.85rem" }} />
+                      <YAxis dataKey="source" type="category" stroke="#94A3B8" style={{ fontSize: "0.8rem" }} />
+                      <Tooltip 
+                        contentStyle={{
+                          backgroundColor: "#FFF",
+                          border: "1px solid #E2E8F0",
+                          borderRadius: "0.5rem",
+                          boxShadow: "0 4px 12px rgba(0,0,0,0.08)"
+                        }}
+                      />
+                      <Bar dataKey="count" fill="#06B6D4" radius={[0, 6, 6, 0]} />
+                    </BarChart>
+                  </ResponsiveContainer>
+                </div>
+              </article>
+            </div>
+          )}
+
+          {/* Search View */}
+          {view === "search" && (
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 fade-up">
+              {/* Search Panel */}
+              <article className="chart-container">
+                <div className="panel-title mb-4">Search and Scan</div>
+                <div className="space-y-4">
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-2">Query</label>
+                    <input
+                      className="w-full"
+                      value={query}
+                      onChange={(e) => setQuery(e.target.value)}
+                      placeholder="Search email, username, or domain"
+                    />
+                  </div>
+                  <div className="bg-blue-50 border border-blue-200 rounded-lg p-3">
+                    <p className="text-xs uppercase tracking-widest text-blue-700 font-semibold">Auto-detected type</p>
+                    <p className="font-bold text-blue-900 capitalize mt-1">{queryType}</p>
+                  </div>
+                  <div className="flex flex-wrap gap-3">
+                    <button className="btn btn-primary" onClick={runScan} disabled={loading}>
+                      {loading ? "Scanning..." : "Run Scan"}
+                    </button>
+                    <button className="btn btn-secondary" onClick={loadCachedResult} disabled={loading}>
+                      Load Cache
+                    </button>
+                    <button className="btn btn-success" onClick={createWatch} disabled={loading}>
+                      Add Watch
+                    </button>
+                  </div>
+                </div>
+              </article>
+
+              {/* Results Panel */}
+              {unifiedReport && (
+                <article className="result-panel">
+                  <div className="panel-header">
+                    <div>
+                      <p className="text-xs uppercase tracking-wider text-gray-600 font-semibold">Investigation Target</p>
+                      <h3 className="text-2xl font-bold text-gray-900 mt-2">{unifiedReport.ioc_value}</h3>
+                      <p className="text-sm text-gray-600 mt-1">Type: <span className="font-semibold">{unifiedReport.ioc_type}</span></p>
+                    </div>
+                    <span className={`risk-badge ${getRiskBand(unifiedReport.threat_score).tone}`}>
+                      {unifiedReport.risk_level}
+                    </span>
+                  </div>
+
+                  {/* 4 Score Display with Radial Rings */}
+                  <div className="score-grid">
+                    <div className="score-card exposure">
+                      <p className="score-label">Exposure Score</p>
+                      <RadialProgressRing value={unifiedReport.exposure_score} max={100} color="#3B82F6" label="Score" size={80} />
+                    </div>
+                    <div className="score-card threat">
+                      <p className="score-label">Threat Score</p>
+                      <RadialProgressRing value={unifiedReport.threat_score} max={100} color="#DC2626" label="Score" size={80} />
+                    </div>
+                    <div className="score-card reputation">
+                      <p className="score-label">Reputation</p>
+                      <div className="text-center">
+                        <p className="score-value text-lg">{unifiedReport.reputation_status}</p>
+                      </div>
+                    </div>
+                    <div className="score-card confidence">
+                      <p className="score-label">Confidence</p>
+                      <RadialProgressRing value={unifiedReport.confidence_score} max={100} color="#10B981" label="Score" size={80} />
+                    </div>
+                  </div>
+
+                  {/* Export Buttons */}
+                  <div className="flex gap-3 my-4 pt-4 border-t border-gray-200">
+                    <button
+                      onClick={handleExportPDF}
+                      disabled={exportingPDF || exportingCSV}
+                      className="flex-1 btn btn-primary"
+                    >
+                      <Download size={16} />
+                      {exportingPDF ? "Exporting..." : "Export PDF"}
+                    </button>
+                    <button
+                      onClick={handleExportCSV}
+                      disabled={exportingCSV || exportingPDF}
+                      className="flex-1 btn btn-success"
+                    >
+                      <FileText size={16} />
+                      {exportingCSV ? "Exporting..." : "Export CSV"}
+                    </button>
+                  </div>
+
+                  {/* Findings */}
+                  {unifiedReport.findings.length > 0 && (
+                    <div className="bg-blue-50 rounded-lg p-3 border border-blue-200">
+                      <p className="text-xs text-blue-700 uppercase tracking-wide font-semibold mb-2">Findings ({unifiedReport.findings.length})</p>
+                      <div className="space-y-2 max-h-40 overflow-auto">
+                        {unifiedReport.findings.map((finding, idx) => (
+                          <div key={idx} className="rounded bg-white p-2 border border-blue-100">
+                            <div className="flex items-start justify-between gap-2">
+                              <div className="flex-1">
+                                <p className="font-semibold text-xs text-gray-900">{finding.title}</p>
+                                <p className="text-xs text-gray-600 mt-1">{finding.description}</p>
+                                <p className="text-xs text-gray-500 mt-1">From: {finding.source}</p>
+                              </div>
+                              <span className={`text-xs font-semibold whitespace-nowrap px-2 py-1 rounded ${
+                                finding.severity === "Critical" ? "bg-red-100 text-red-700" :
+                                finding.severity === "High" ? "bg-orange-100 text-orange-700" :
+                                finding.severity === "Medium" ? "bg-yellow-100 text-yellow-700" :
+                                "bg-green-100 text-green-700"
+                              }`}>
+                                {finding.severity}
+                              </span>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Sources Info */}
+                  {(unifiedReport.sources_queried.length > 0 || unifiedReport.sources_failed.length > 0) && (
+                    <div className="rounded-lg bg-gray-50 p-3 border border-gray-200 text-xs mt-3">
+                      <p className="text-gray-700 font-semibold mb-2">Data Sources</p>
+                      <div className="grid grid-cols-2 gap-2">
+                        {unifiedReport.sources_queried.length > 0 && (
+                          <div>
+                            <p className="text-gray-600 font-medium">✓ Queried</p>
+                            <p className="text-gray-500">{unifiedReport.sources_queried.join(", ")}</p>
+                          </div>
+                        )}
+                        {unifiedReport.sources_failed.length > 0 && (
+                          <div>
+                            <p className="text-gray-600 font-medium">✗ Failed</p>
+                            <p className="text-gray-500">{unifiedReport.sources_failed.join(", ")}</p>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  )}
+                </article>
+              )}
+                          <p className="text-3xl font-display font-bold text-blue-900">{unifiedReport.exposure_score.toFixed(1)}</p>
+                          <p className="text-xs text-blue-700">/100</p>
+                        </div>
+                        <div className="mt-2 h-1.5 bg-blue-200 rounded-full overflow-hidden">
+                          <div className="h-full bg-blue-600" style={{ width: `${Math.min(100, unifiedReport.exposure_score)}%` }} />
+                        </div>
+                        {unifiedReport.exposure_reasoning && (
+                          <p className="text-xs text-blue-700 mt-2">{unifiedReport.exposure_reasoning.summary}</p>
+                        )}
+                      </div>
+
+                      {/* Threat Score */}
+                      <div className="rounded-lg bg-gradient-to-br from-red-50 to-red-100/50 p-3 border border-red-200">
+                        <p className="text-xs text-red-700 uppercase tracking-wide font-semibold">Threat Score</p>
+                        <div className="flex items-baseline gap-2 mt-1">
+                          <p className="text-3xl font-display font-bold text-red-900">{unifiedReport.threat_score.toFixed(1)}</p>
+                          <p className="text-xs text-red-700">/100</p>
+                        </div>
+                        <div className="mt-2 h-1.5 bg-red-200 rounded-full overflow-hidden">
+                          <div className="h-full bg-red-600" style={{ width: `${Math.min(100, unifiedReport.threat_score)}%` }} />
+                        </div>
+                        {unifiedReport.threat_reasoning && (
+                          <p className="text-xs text-red-700 mt-2">{unifiedReport.threat_reasoning.summary}</p>
+                        )}
+                      </div>
+
+                      {/* Reputation Status */}
+                      <div className="rounded-lg bg-gradient-to-br from-amber-50 to-amber-100/50 p-3 border border-amber-200">
+                        <p className="text-xs text-amber-700 uppercase tracking-wide font-semibold">Reputation</p>
+                        <p className="text-lg font-display font-bold text-amber-900 mt-1">{unifiedReport.reputation_status}</p>
+                        {unifiedReport.reputation_reasoning && (
+                          <p className="text-xs text-amber-700 mt-2">{unifiedReport.reputation_reasoning}</p>
+                        )}
+                      </div>
+
+                      {/* Confidence Score */}
+                      <div className="rounded-lg bg-gradient-to-br from-green-50 to-green-100/50 p-3 border border-green-200">
+                        <p className="text-xs text-green-700 uppercase tracking-wide font-semibold">Confidence</p>
+                        <div className="flex items-baseline gap-2 mt-1">
+                          <p className="text-3xl font-display font-bold text-green-900">{(unifiedReport.confidence_score * 100).toFixed(0)}</p>
+                          <p className="text-xs text-green-700">%</p>
+                        </div>
+                        <div className="mt-2 h-1.5 bg-green-200 rounded-full overflow-hidden">
+                          <div className="h-full bg-green-600" style={{ width: `${Math.min(100, unifiedReport.confidence_score * 100)}%` }} />
+                        </div>
+                        {unifiedReport.confidence_reasoning && (
+                          <p className="text-xs text-green-700 mt-2">{unifiedReport.confidence_reasoning}</p>
+                        )}
+                      </div>
+                    </div>
+
+                    {/* Export Buttons */}
+                    <div className="flex gap-2 mb-4">
+                      <button
+                        onClick={handleExportPDF}
+                        disabled={exportingPDF}
+                        className="flex-1 flex items-center justify-center gap-2 rounded-lg bg-blue-600 hover:bg-blue-700 disabled:bg-blue-400 text-white px-3 py-2 font-semibold transition"
+                      >
+                        <FileText size={16} />
+                        {exportingPDF ? "Exporting..." : "Export PDF"}
+                      </button>
+                      <button
+                        onClick={handleExportCSV}
+                        disabled={exportingCSV}
+                        className="flex-1 flex items-center justify-center gap-2 rounded-lg bg-green-600 hover:bg-green-700 disabled:bg-green-400 text-white px-3 py-2 font-semibold transition"
+                      >
+                        <Download size={16} />
+                        {exportingCSV ? "Exporting..." : "Export CSV"}
+                      </button>
+                    </div>
+
+                    {/* Findings Summary */}
+                    {unifiedReport.findings.length > 0 && (
+                      <div className="rounded-lg bg-gray-50 p-3 border border-gray-200">
+                        <p className="text-xs text-gray-700 uppercase tracking-wide font-semibold mb-2">Findings ({unifiedReport.findings.length})</p>
+                        <div className="space-y-2 max-h-40 overflow-auto">
+                          {unifiedReport.findings.map((finding, idx) => (
+                            <div key={idx} className="rounded bg-white p-2 border border-gray-100">
+                              <div className="flex items-start justify-between gap-2">
+                                <div className="flex-1">
+                                  <p className="font-semibold text-xs text-gray-900">{finding.title}</p>
+                                  <p className="text-xs text-gray-600 mt-1">{finding.description}</p>
+                                  <p className="text-xs text-gray-500 mt-1">From: {finding.source}</p>
+                                </div>
+                                <span className={`px-2 py-1 rounded text-xs font-semibold whitespace-nowrap ${
+                                  finding.severity === "Critical" ? "bg-red-100 text-red-700" :
+                                  finding.severity === "High" ? "bg-orange-100 text-orange-700" :
+                                  finding.severity === "Medium" ? "bg-yellow-100 text-yellow-700" :
+                                  "bg-green-100 text-green-700"
+                                }`}>
+                                  {finding.severity}
+                                </span>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Sources Info */}
+                    {(unifiedReport.sources_queried.length > 0 || unifiedReport.sources_failed.length > 0) && (
+                      <div className="rounded-lg bg-gray-50 p-3 border border-gray-200 text-xs">
+                        <p className="text-gray-700 font-semibold mb-1">Data Sources</p>
+                        <div className="grid grid-cols-2 gap-2">
+                          {unifiedReport.sources_queried.length > 0 && (
+                            <div>
+                              <p className="text-gray-600 font-medium">✓ Queried</p>
+                              <p className="text-gray-500">{unifiedReport.sources_queried.join(", ")}</p>
+                            </div>
+                          )}
+                          {unifiedReport.sources_failed.length > 0 && (
+                            <div>
+                              <p className="text-gray-600 font-medium">✗ Failed</p>
+                              <p className="text-gray-500">{unifiedReport.sources_failed.join(", ")}</p>
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Export Buttons */}
+                    <div className="flex flex-wrap gap-3 mt-4 pt-4 border-t border-gray-200">
+                      <button
+                        onClick={handleExportPDF}
+                        disabled={exportingPDF || exportingCSV}
+                        className={`flex items-center gap-2 px-4 py-2 rounded-lg font-semibold text-sm transition ${
+                          exportingPDF
+                            ? "bg-blue-100 text-blue-600 cursor-not-allowed"
+                            : "bg-blue-600 text-white hover:bg-blue-700 shadow-md hover:shadow-lg"
+                        }`}
+                      >
+                        <Download size={16} />
+                        {exportingPDF ? "Exporting PDF..." : "Export PDF"}
+                      </button>
+                      <button
+                        onClick={handleExportCSV}
+                        disabled={exportingCSV || exportingPDF}
+                        className={`flex items-center gap-2 px-4 py-2 rounded-lg font-semibold text-sm transition ${
+                          exportingCSV
+                            ? "bg-green-100 text-green-600 cursor-not-allowed"
+                            : "bg-green-600 text-white hover:bg-green-700 shadow-md hover:shadow-lg"
+                        }`}
+                      >
+                        <FileText size={16} />
+                        {exportingCSV ? "Exporting CSV..." : "Export CSV"}
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              )}
+              {result && !unifiedReport && (
+                <div className="result-panel rounded-xl border border-steel/20 p-4 bg-white/75 text-sm">
+                  {(() => {
+                    const band = getRiskBand(result.risk_score);
+                    return (
+                      <>
+                        <div className="flex items-start justify-between gap-3">
+                          <div>
+                            <p className="text-xs uppercase tracking-[0.2em] text-steel">Query result</p>
+                            <h3 className="font-display text-xl font-bold text-ink mt-1">{result.query}</h3>
+                          </div>
+                          <span className={`risk-pill ${riskToneClass(band.tone)}`}>{band.label}</span>
+                        </div>
+                        <div className="mt-4 grid grid-cols-2 gap-3">
+                          <div className="rounded-xl bg-mist/60 p-3">
+                            <p className="text-xs text-steel uppercase tracking-wide">Exposure score</p>
+                            <p className="text-2xl font-display font-bold text-ink">{result.risk_score.toFixed(1)}</p>
+                          </div>
+                          <div className="rounded-xl bg-mist/60 p-3">
+                            <p className="text-xs text-steel uppercase tracking-wide">Findings</p>
+                            <p className="text-2xl font-display font-bold text-ink">{result.total_findings}</p>
+                          </div>
+                        </div>
+                        <div className="mt-4">
+                          <div className="risk-track">
+                            <div className={`risk-fill ${riskToneClass(band.tone)}`} style={{ width: `${Math.min(100, result.risk_score)}%` }} />
+                          </div>
+                          <p className="mt-2 text-xs text-steel">{band.description}</p>
+                        </div>
+                      </>
+                    );
+                  })()}
+                </div>
+              )}
+            </div>
+          </article>
+
+          <article className="glass border border-white/60 rounded-2xl p-4 shadow-sm">
+            <h2 className="font-display font-bold mb-3">Recent Watch Targets</h2>
+            <div className="space-y-2 max-h-80 overflow-auto pr-1">
+              {watches.map((watch) => (
+                <div key={watch.id} className="rounded-xl bg-white/70 border border-steel/20 p-3">
+                  <p className="font-semibold">{watch.target}</p>
+                  <p className="text-sm text-steel">Type: {watch.query_type}</p>
+                  <p className="text-sm text-steel">Every {watch.interval_minutes} min</p>
+                  <p className="text-xs text-steel/80">
+                    Last scan: {watch.last_scanned_at ? new Date(watch.last_scanned_at).toLocaleString() : "-"}
+                  </p>
+                </div>
+              ))}
+              {watches.length === 0 && <p className="text-sm text-steel">No watch targets yet</p>}
+            </div>
+          </article>
+        </section>
+      )}
+
+          {/* Alerts View */}
+          {view === "alerts" && (
+            <article className="chart-container fade-up">
+              <div className="panel-title mb-4">Live Alerts</div>
+              <div className="space-y-3 max-h-[35rem] overflow-auto pr-2">
+                {alerts.map((alert) => (
+                  <div key={alert.id} className="rounded-lg border border-gray-200 bg-white p-3 hover:shadow-md transition">
+                    {(() => {
+                      const band = getRiskBand(alert.risk_score);
+                      return (
+                        <>
+                          <div className="flex items-start justify-between gap-3">
+                            <div>
+                              <p className="font-semibold text-gray-900">{alert.query}</p>
+                              <p className="text-sm text-gray-600 mt-1">{alert.reason}</p>
+                            </div>
+                            <span className={`risk-badge ${band.tone}`}>{band.label}</span>
+                          </div>
+                          <div className="mt-3 flex items-center justify-between">
+                            <span className="text-sm text-gray-600">Score {alert.risk_score.toFixed(1)}</span>
+                            {alert.status === "open" ? (
+                              <button className="text-sm text-blue-600 hover:underline" onClick={() => ackAlert(alert.id)}>
+                                Acknowledge
+                              </button>
+                            ) : (
+                              <span className="text-xs text-gray-500">Acknowledged</span>
+                            )}
+                          </div>
+                        </>
+                      );
+                    })()}
+                  </div>
+                ))}
+                {alerts.length === 0 && <p className="text-sm text-gray-600 text-center py-8">No alerts yet</p>}
+              </div>
+            </article>
+          )}
+
+          {/* Admin View */}
+          {view === "admin" && (
+            <article className="chart-container fade-up">
+              <div className="panel-title mb-4">Administration</div>
+              <p className="text-gray-600 mb-4">Trigger background ingestion scans and monitor system activity.</p>
+              <button className="btn btn-primary" onClick={triggerScanJob} disabled={loading}>
+                {loading ? "Triggering..." : "Trigger Background Scan"}
+              </button>
+            </article>
+          )}
+
+          {/* Watch Targets Section - Always Visible Below */}
+          {view === "dashboard" && (
+            <div className="fade-up">
+              <article className="chart-container">
+                <div className="panel-title mb-4">Recent Watch Targets</div>
+                <div className="space-y-2 max-h-80 overflow-auto">
+                  {watches.map((watch) => (
+                    <div key={watch.id} className="rounded-lg border border-gray-200 bg-white p-3 hover:shadow-sm transition">
+                      <p className="font-semibold text-gray-900">{watch.target}</p>
+                      <p className="text-sm text-gray-600 mt-1">Type: {watch.query_type}</p>
+                      <p className="text-sm text-gray-600">Every {watch.interval_minutes} min</p>
+                      <p className="text-xs text-gray-500 mt-1">
+                        Last scan: {watch.last_scanned_at ? new Date(watch.last_scanned_at).toLocaleString() : "-"}
+                      </p>
+                    </div>
+                  ))}
+                  {watches.length === 0 && <p className="text-sm text-gray-600 text-center py-4">No watch targets yet</p>}
+                </div>
+              </article>
+            </div>
+          )}
+        </div>
+      </div>
+    </>
+  );
+}
